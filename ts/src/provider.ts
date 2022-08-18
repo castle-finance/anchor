@@ -28,16 +28,16 @@ export default interface Provider {
   ): Promise<TransactionSignature>;
   sendAndConfirm?(
     tx: Transaction,
-    signers?: Signer[],
+    signers?: (Signer | Wallet)[],
     opts?: ConfirmOptions
   ): Promise<TransactionSignature>;
   sendAll?(
-    txWithSigners: { tx: Transaction; signers?: Signer[] }[],
+    txWithSigners: { tx: Transaction; signers?: (Signer | Wallet)[] }[],
     opts?: ConfirmOptions
   ): Promise<Array<TransactionSignature>>;
   simulate?(
     tx: Transaction,
-    signers?: Signer[],
+    signers?: (Signer | Wallet)[],
     commitment?: Commitment,
     includeAccounts?: boolean | PublicKey[]
   ): Promise<SuccessfulTxSimulationResponse>;
@@ -112,6 +112,16 @@ export class AnchorProvider implements Provider {
     return new AnchorProvider(connection, wallet, options);
   }
 
+  async addSignatures(tx: Transaction, signers: (Signer | Wallet)[]) {
+    for (const signer of signers) {
+      if (signer["publicKey"] != null && signer["secretKey"] != null) {
+        tx.partialSign(signer as Signer);
+      } else {
+        tx = await (signer as Wallet).signTransaction(tx);
+      }
+    }
+  }
+
   /**
    * Sends the given transaction, paid for and signed by the provider's wallet.
    *
@@ -121,7 +131,7 @@ export class AnchorProvider implements Provider {
    */
   async sendAndConfirm(
     tx: Transaction,
-    signers?: Signer[],
+    signers?: (Signer | Wallet)[],
     opts?: ConfirmOptions
   ): Promise<TransactionSignature> {
     if (opts === undefined) {
@@ -134,9 +144,9 @@ export class AnchorProvider implements Provider {
     ).blockhash;
 
     tx = await this.wallet.signTransaction(tx);
-    (signers ?? []).forEach((kp) => {
-      tx.partialSign(kp);
-    });
+    if (signers != null) {
+      await this.addSignatures(tx, signers);
+    }
 
     const rawTx = tx.serialize();
 
@@ -170,7 +180,7 @@ export class AnchorProvider implements Provider {
    * Similar to `send`, but for an array of transactions and signers.
    */
   async sendAll(
-    txWithSigners: { tx: Transaction; signers?: Signer[] }[],
+    txWithSigners: { tx: Transaction; signers?: (Signer | Wallet)[] }[],
     opts?: ConfirmOptions
   ): Promise<Array<TransactionSignature>> {
     if (opts === undefined) {
@@ -180,19 +190,20 @@ export class AnchorProvider implements Provider {
       opts.preflightCommitment
     );
 
-    let txs = txWithSigners.map((r) => {
-      let tx = r.tx;
-      let signers = r.signers ?? [];
+    let txs = await Promise.all(
+      txWithSigners.map(async (r): Promise<Transaction> => {
+        let tx = r.tx;
+        let signers = r.signers ?? [];
 
-      tx.feePayer = this.wallet.publicKey;
-      tx.recentBlockhash = blockhash.blockhash;
+        tx.feePayer = this.wallet.publicKey;
+        tx.recentBlockhash = blockhash.blockhash;
+        if (signers != null) {
+          await this.addSignatures(tx, signers);
+        }
 
-      signers.forEach((kp) => {
-        tx.partialSign(kp);
-      });
-
-      return tx;
-    });
+        return tx;
+      })
+    );
 
     const signedTxs = await this.wallet.signAllTransactions(txs);
 
@@ -218,7 +229,7 @@ export class AnchorProvider implements Provider {
    */
   async simulate(
     tx: Transaction,
-    signers?: Signer[],
+    signers?: (Signer | Wallet)[],
     commitment?: Commitment,
     includeAccounts?: boolean | PublicKey[]
   ): Promise<SuccessfulTxSimulationResponse> {
